@@ -1,0 +1,595 @@
+---
+title: "Deskriptivní statistiky časových řad"
+author: "Daniel Bartušek"
+output: html_document
+runtime: shiny
+---
+```{r setting, echo = F}
+rm(list = ls())
+options(scipen = 100, digits = 8)
+knitr::opts_chunk$set(warning=FALSE)
+knitr::opts_chunk$set(message=FALSE)
+knitr::opts_chunk$set(echo = TRUE)
+quiet <- function(x) { 
+  sink(tempfile()) 
+  on.exit(sink()) 
+  invisible(force(x)) 
+}
+```
+
+```{r functions,echo=F}
+format_cells <- function(df, rows ,cols, value = c("italics", "bold", "strikethrough")){
+  map <- setNames(c("*", "**", "~~"), c("italics", "bold", "strikethrough"))
+  markup <- map[value]
+  for (r in rows){
+    for(c in cols){
+      df[[c]] <- as.character( df[[c]])
+      df[r, c] <- paste0(markup, df[r, c], markup)
+    }
+  }
+  return(df)
+}
+
+best_garch<-function(fit){
+  p_max <- 5
+  q_max <- 5
+  aic_min <- Inf
+  best_p <- 0
+  best_q <- 0
+  x <- fit$x %>%as.vector()
+  ar <- ifelse(length(fit$coef)>0,fit$arma[2],0)
+  ma<- ifelse(length(fit$coef)>0,fit$arma[1],0)
+  for (i1 in 1:p_max) {
+    for (i2 in 1:q_max) {
+      model_specification <- ugarchspec(mean.model = list(armaOrder = c(ar,ma), include.mean = TRUE),
+                                        variance.model = list(garchOrder = c(i1, i2)))
+      fit <- ugarchfit(spec = model_specification, data = x)
+      inf_crit <- infocriteria(fit)[1]
+      aic_min <- ifelse(inf_crit < aic_min, inf_crit, aic_min)
+      best_p <- ifelse(inf_crit == aic_min, i1, best_p)
+      best_q <- ifelse(inf_crit == aic_min, i2, best_q)
+    }
+  }
+
+  return(c(best_p,best_q))
+}
+```
+
+```{r packages, echo = F }
+library(ggplot2)
+library(readxl)
+library(ggpubr)
+library(kableExtra)
+library(stargazer)
+library(moments)
+library(tseries)
+library(lmtest)
+library(stringr)
+library(frequencyConnectedness)
+library(imputeTS)
+library(ggcorrplot)
+library(lubridate)
+library(dplyr)
+library(reshape2)
+library(strucchange)
+library(parallel)
+library(BigVAR)
+library(scales)
+library(here)
+library(gridExtra)
+library(rmgarch)
+library(aTSA)
+library(forecast)
+library(FinTS)
+```
+
+```{r date_ranges,echo=F}
+gfc_from<-"2007-06-29"
+post_gfc_from<-"2009-02-06"
+low_oil_from<-"2014-11-30"
+fed_rates_from<-"2017-08-10"
+covid_from<-"2020-01-01" 
+gfc_to<-"2009-02-05"
+post_gfc_to<-"2014-11-29"
+low_oil_to<-"2017-08-09"
+fed_rates_to<-"2019-12-31"
+covid_to<-"2022-01-01"
+ranges<-data.frame(cbind(c("GFC", "Post-GFC", "Low oil prices","Fed Rates Increase","Covid"),
+                         c(gfc_from,post_gfc_from,low_oil_from,fed_rates_from,covid_from),
+                         c(gfc_to,post_gfc_to,low_oil_to,fed_rates_to,covid_to)))
+colnames(ranges)<-c("labels","from","to")
+```
+
+
+```{r load_data, echo=F}
+pca_corr_norm<-readRDS("data/pca/pca_corr.rds")
+pca_corr_ret<-readRDS("data/pca/cor_ret_df.rds")
+pca_vals<-readRDS("data/pca/pca_vals.rds")
+log_ret_df<-readRDS("data/log_ret.rds")
+df<-readRDS("data/df.rds")
+adcc_fits<-readRDS("data/adcc_fits.rds")
+long_log_ret <- melt(log_ret_df, id.vars = "Date")
+long_df <- reshape2::melt(df, id.vars = c("Date","Weekday","Holiday"))
+stylized_names <-c("Natural Gas","Crude Oil WTI","NY Gasoline","Heating Oil","Diesel")
+```
+
+## Prices
+```{r prices_stats,echo=F}
+  selectInput("period", "Choose a period:",
+      list(`Period` = list( "GFC", "Post-GFC", "Low oil prices","Fed Rates Increase","Covid"))
+    )
+
+renderPlot({
+dt_from<-ranges %>% filter(labels== input$period) %>% select(2) %>% pull()
+dt_to<-ranges %>% filter(labels == input$period) %>% select(3) %>% pull()
+long_df_aux<-long_df[long_df$Date>=dt_from,]
+long_df_aux<-long_df_aux[long_df_aux$Date<=dt_to,]
+
+ggplot(long_df_aux, aes(x = Date, y = value)) +
+  geom_line() +
+  facet_wrap(~variable, scales = "free") +
+  ggtitle("Prices") 
+})
+
+renderPlot({
+dt_from<-ranges %>% filter(labels== input$period) %>% select(2) %>% pull()
+dt_to<-ranges %>% filter(labels == input$period) %>% select(3) %>% pull()
+long_df_aux<-long_df[long_df$Date>dt_from,]
+long_df_aux<-long_df_aux[long_df_aux$Date<dt_to,]
+
+ggplot(long_df_aux, aes(factor(variable), value)) + 
+  geom_boxplot() + 
+  facet_wrap(~variable, scale="free")
+})
+
+```
+
+
+```{r bp_comparison, echo= F,eval=F}
+breaks<-readRDS("data/struc_change/break_dates.rds")
+
+bp_6<-data.frame(matrix(ncol=9,nrow=5))
+bp_7<-data.frame(matrix(ncol=9,nrow=5))
+bp_8<-data.frame(matrix(ncol=9,nrow=5))
+bp_9<-data.frame(matrix(ncol=9,nrow=5))
+rownames(bp_6)<-names(breaks)
+rownames(bp_7)<-names(breaks)
+for (i in 1:length(breaks)){
+  bp_6[i,]<-breaks[[i]][6,]
+  bp_7[i,]<-breaks[[i]][7,]
+  bp_8[i,]<-breaks[[i]][8,]
+  bp_9[i,]<-breaks[[i]][9,]
+}
+
+make_bp_df<-function(bp_num){
+  bp_name<-data.frame(matrix(ncol=9,nrow=5)) 
+  rownames(bp_name)<-names(breaks)
+  colnames(bp_name)<-paste("BP",rep(1:length(bp_name)))
+  for (i in 1:length(breaks)){
+  bp_name[i,]<-breaks[[i]][bp_num,]
+  }
+  bp_name<-bp_name %>% mutate_all(as.Date)
+  bp_sum<-bp_name %>% summarize_all(mean.Date,na.rm = T)
+  rownames(bp_sum)<-"Mean"
+  bp_name<-rbind(bp_name,bp_sum) %>% format_cells(6, 1:9, "bold") 
+  return(bp_name)
+}
+
+make_bp_df(6)%>% kbl() %>% kable_classic_2()
+make_bp_df(7)%>% kbl() %>% kable_classic_2()
+make_bp_df(8)%>% kbl() %>% kable_classic_2()
+make_bp_df(9)%>% kbl() %>% kable_classic_2()
+```
+
+
+
+```{r breakpoints, echo = F,evql=F}
+dates<-log_ret_df %>% dplyr::select(1)%>%pull()
+char_dates<-as.character(dates)
+dates_df<-df %>% dplyr::select(1)%>%pull()
+char_dates_df<-as.character(dates_df)
+chows<-readRDS("data/struc_change/chow.rds")
+breaks<-readRDS("data/struc_change/break_dates.rds")
+bp_plots<-readRDS("data/struc_change/bp_plots.rds")
+breaks_v2<-readRDS("data/struc_change/break_dates_v2.rds")
+bp_plots_v2<-readRDS("data/struc_change/bp_plots_v2.rds")
+main_list_plt<-list()
+for(i in 4:8){
+  main_list_plt<-c(main_list_plt,list(df[i]))
+}
+names(main_list_plt)<-names(chows)
+
+
+selectInput("opt_bp", "Choose how many breakpoints to plot:",
+      list(`Optimal Breakpoint Number`  = c("Optimal",seq(1,9)))
+    )
+selectInput("struct_change", "Choose a series:",
+      list(`Log Returns Period` = colnames(log_ret_df[-1]))
+    )
+renderPrint({
+   chow<-chows[[input$struct_change]]
+    print("Chow test (H0: there are no structural brakes)")
+    print(chow)
+})
+# renderTable({
+#    bp_df<-breaks[[input$struct_change]]
+#    rownames(bp_df)<-paste(rep(1:nrow(bp_df)),"Breakpoints modeled")
+#    colnames(bp_df)<-paste("Breakpoint",rep(1:nrow(bp_df)))
+#    bp_df
+# },rownames = TRUE)
+
+renderPlot({
+  bp_df<-breaks[[input$struct_change]]
+  bp_object<-bp_plots[[input$struct_change]]
+   index_bp<-which.min(bp_object$RSS[2,])-1
+  if(input$opt_bp != "Optimal"){
+    index_bp<-as.numeric(input$opt_bp)
+  }
+  bps<-bp_df[index_bp,] %>% as.character()
+  bp_indexes<-match(bps,char_dates_df)
+  bp_indexes<-bp_indexes[!is.na(bp_indexes)]
+  
+  plot.ts(df[[input$struct_change]],xaxt='n')
+  axis(1, at=bp_indexes, labels=char_dates_df[bp_indexes])
+  abline(v=bp_indexes, col="red")
+})
+
+renderPlot({
+   bp<-bp_plots[[input$struct_change]]
+   plot(bp)
+})
+```
+
+## Log Returns
+
+
+```{r corplot_logret,echo=F,message=T,warning=T}
+selectInput("period_corrplot", "Choose a period:",
+      list(`Log Returns Period` = list("GFC", "Post-GFC", "Low oil prices","Fed Rates Increase","Covid"))
+    )
+
+renderPlot({
+dt_from<-ranges %>% filter(labels== input$period_corrplot) %>% select(2) %>% pull()
+dt_to<-ranges %>% filter(labels == input$period_corrplot) %>% select(3) %>% pull()
+aux<-subset(log_ret_df, Date>=dt_from & Date <= dt_to)
+
+corr <- round(cor(aux[-1]),12)
+ggcorrplot(corr, hc.order = TRUE, type = "lower",lab = TRUE)
+})
+
+renderPlot({
+dt_from<-ranges %>% filter(labels== input$period_corrplot) %>% select(2) %>% pull()
+dt_to<-ranges %>% filter(labels == input$period_corrplot) %>% select(3) %>% pull()
+log_ret_aux<-long_log_ret[(long_log_ret$Date>=dt_from &long_log_ret$Date<=dt_to),]
+
+ggplot(log_ret_aux, aes(x = Date, y = value)) +
+  geom_line() +
+  facet_wrap(~variable, scales = "free") +
+  ggtitle("Log Returns")
+
+})
+```
+
+
+### Summary and Statistical Tests
+```{r test_prep, echo = F}
+selectInput("period_table", "Choose a period:",
+      list(`Log Returns Period` = list( "GFC", "Post-GFC", "Low oil prices","Fed Rates Increase","Covid"))
+    )
+renderTable({
+dt_from<-ranges %>% filter(labels== input$period_table) %>% select(2) %>% pull()
+dt_to<-ranges %>% filter(labels == input$period_table) %>% select(3) %>% pull()
+
+long_log_ret<-long_log_ret[(long_log_ret$Date>=dt_from &long_log_ret$Date<=dt_to),]
+log_ret_df<-log_ret_df[(log_ret_df$Date>=dt_from & log_ret_df$Date<=dt_to),]  
+  
+summary_df<-long_log_ret %>% group_by(as.factor(variable)) %>%
+  get_summary_stats(type = "common") %>%dplyr::select(-variable,n) %>% 
+  rename("variable" = 1)%>%
+  data.table::transpose( keep.names = "col",make.names = "variable")
+rownames(summary_df)<-summary_df[,1]
+summary_df<-summary_df[-1]
+
+summary_df[c("skewness", "kurtosis"),] <- rbind(c(round(sapply(log_ret_df[c(2:6)],skewness),3),
+                                                  round(sapply(log_ret_df[c(2:6)],kurtosis),3)))
+colnames(summary_df) <- stylized_names
+
+ar_1_list <- list()
+q_10_list<- list()
+q2_10_list<- list()
+ma_1_list <- list()
+arch_4_list<-list()
+shapiro_norm_list<-list()
+adf_list<-list()
+jarque_bera_list<-list()
+garch_list<-list()
+garch_q_10<-list()
+garch_q2_10<-list()
+
+for(i in 2:length(log_ret_df)){
+  val<-log_ret_df[,i] %>%pull( )
+  lag_val<-lag(val,1)
+  res<-lm(val~lag_val)$residuals
+  fit_auto <- auto.arima(val, ic = c("bic"), stationary = TRUE)
+  opt_ar<-ifelse(length(fit_auto$coef)>0,fit_auto$arma[1],0)
+  opt_ma<-ifelse(length(fit_auto$coef)>0,fit_auto$arma[2],0)
+  garch_orders<-best_garch(fit_auto)
+  model_specification <- ugarchspec(mean.model = list(armaOrder = c(opt_ar,opt_ma), include.mean = TRUE),
+                                        variance.model = list(garchOrder = c(garch_orders[1],garch_orders[2])))
+  garch_fit_res<-residuals(ugarchfit(model_specification,val)) %>% as.vector()
+  shapiro_norm_list[[i-1]]<-shapiro.test(sample(val,size=min(5000,length(val)),replace = F))
+  adf_list[[i-1]] <- tseries::adf.test(val)
+  ma_1_list[[i-1]] <- opt_ar
+  ar_1_list[[i-1]] <- opt_ma
+  q_10_list[[i-1]]<-Box.test(fit_auto$residuals, lag = 10, type =  "Ljung-Box")
+  q2_10_list[[i-1]]<-Box.test(fit_auto$residuals^2, lag = 10, type =  "Ljung-Box")
+  arch_4_list[[i-1]]<- ArchTest(fit_auto$residuals, lags = 4, demean = FALSE)
+  jarque_bera_list[[i-1]]<-jarque.bera.test(val)
+  garch_list[[i-1]]<-garch_orders
+  garch_q_10[[i-1]]<-Box.test(garch_fit_res, lag = 10, type =  "Ljung-Box")
+  garch_q2_10[[i-1]]<-Box.test(garch_fit_res^2, lag = 10, type =  "Ljung-Box")
+}
+
+res_matrix<-data.frame(matrix(ncol=length(stylized_names),nrow=20))
+x <- c("name", "age", "gender")
+colnames(res_matrix) <- stylized_names
+rownames(res_matrix)<-c("Shapiro Normality","Shapiro Normality PVal","ADF","ADF Pval","Jarque-Berra","Jarque Berra Pval","AR order","MA order","Q(10)","Q(10) Pval","Q2(10)","Q2(10) Pval","ARCH(4)","ARCH(4) Pval","GARCH Order(p)","ARCH Order (q)","Garch Q(10)","Garch Q(10) Pval","Garch Q2(10)","Garch Q2(10) Pval")
+
+for (i in 1:length(stylized_names)){
+  res_matrix[1,i]<-round(shapiro_norm_list[[i]]$statistic,2)
+  res_matrix[2,i]<-shapiro_norm_list[[i]]$p.value
+  res_matrix[3,i]<-round(adf_list[[i]]$statistic,2)
+  res_matrix[4,i]<-adf_list[[i]]$p.value
+  res_matrix[5,i]<-round(jarque_bera_list[[i]]$statistic,3)
+  res_matrix[6,i]<-jarque_bera_list[[i]]$p.value
+  res_matrix[7,i]<-ar_1_list[[i]]
+  res_matrix[8,i]<-ma_1_list[[i]]
+  res_matrix[9,i]<-round(q_10_list[[i]]$statistic,2)
+  res_matrix[10,i]<-q_10_list[[i]]$p.value
+  res_matrix[11,i]<-round(q2_10_list[[i]]$statistic,2)
+  res_matrix[12,i]<-q2_10_list[[i]]$p.value
+  res_matrix[13,i]<-round(arch_4_list[[i]]$statistic,2)
+  res_matrix[14,i]<-arch_4_list[[i]]$p.value
+  res_matrix[15,i]<-garch_list[[i]][1]
+  res_matrix[16,i]<-garch_list[[i]][2]
+  res_matrix[17,i]<-round(garch_q_10[[i]]$statistic,2)
+  res_matrix[18,i]<-garch_q_10[[i]]$p.value
+  res_matrix[19,i]<-round(garch_q2_10[[i]]$statistic,2)
+  res_matrix[20,i]<-garch_q2_10[[i]]$p.value
+}
+
+for (i in 1:(length(res_matrix))){
+  row <- as.character(res_matrix[,i])
+  for (j in seq(from = 1, to = length(row)-1,by = 2)){
+    if(!j %in% c(7,8,15,16)){
+      coef<-round(as.numeric(row[j]),4)
+      pval<-as.numeric(row[j+1])
+      row[j]<-ifelse(pval<=0.001,paste(coef,"***",sep=""),
+                     ifelse(pval<=0.01,paste(coef,"**",sep=""),
+                            ifelse(pval<=0.05,paste(coef,"*",sep=""),as.character(coef))))
+      row[j+1]<-as.character(round(pval,5))
+    }
+  }
+  res_matrix[,i]<-row
+}
+
+final_df<-summary_df %>% rbind(res_matrix)
+final_df
+},options = list(scrollX = TRUE),
+rownames = TRUE, width="100%",spacing="xs")
+```
+
+## Spillovers
+
+All functions are documented in the frequencyConnectedness package on [Cran](https://cran.r-project.org/web/packages/frequencyConnectedness/frequencyConnectedness.pdf).
+
+```{r VAR, echo = F,eval=F}
+opt_lag<-VARselect(log_ret_df[,-c(1)],type="const",lag.max=15)
+df_opt<-data.frame(t(opt_lag$criteria))
+colnames(df_opt)<-c("AIC","HQ","SC","FPE")
+rownames(df_opt)<-paste("Lag",rep(1:nrow(df_opt)))
+
+for (i in 1:length(opt_lag$selection)){
+  df_opt<-format_cells(df_opt,opt_lag$selection[i],i,"bold")
+}
+
+df_opt%>% 
+  kbl()%>%
+  kable_classic_2(full_width = F)
+```
+
+
+```{r AR for VAR, echo = F}
+### Testing of AR in residuals for VAR(1)
+est_lag1<-vars::VAR(log_ret_df[-1], p = 1, type = "const")
+ar_lag1_list<-list()
+for(i in 1:length(est_lag1$varresult)){
+  res<-est_lag1$varresult[i][[1]]$residuals
+  ar_lag1_list[[i]] <- arima( res, order = c(1, 0, 0))
+}
+```
+
+```{r stargazer4,results='asis',echo=F,eval=F}
+stargazer(ar_lag1_list,type="html",align = T)
+```
+
+```{r main_sp_tables, echo = F,eval=F}
+sp_tbl<-list.files("./data/sp_data/total") 
+
+for (i in sp_tbl){
+  sp_table<-readRDS(paste0("data/sp_data/total/",i))
+  print(i)
+  print(sp_table)
+}
+```
+
+```{r echo=F}
+sp_lag1_total<-readRDS("./data/sp_data/total/sp_lag1.rds")
+sp_lag1<-readRDS("./data/sp_data/sp_w100_lag1.rds")
+sp_lag1_roll<-readRDS("./data/sp_data/plots/sp_plot_w100_lag1.rds")
+```
+
+### Spillover plots
+#### Total
+```{r total,echo=F}
+print(sp_lag1_total)
+plot(sp_lag1_roll)
+```
+
+#### Net
+
+```{r net,echo=F}
+net(sp_lag1_total)
+plotNet(sp_lag1)
+```
+
+#### From
+
+```{r from,echo=F}
+from(sp_lag1_total)
+plotFrom(sp_lag1)
+```
+
+#### To
+
+```{r to,echo=F}
+to(sp_lag1_total) 
+plotTo(sp_lag1)
+```
+
+
+```{r pairwise, include=F}
+z<-plotPairwise(sp_lag1)
+colnames(z)<-c("NG-Crude","NG-Gasoline","NG-Heating",
+               "NG-Diesel","Crude-Gasoline","Crude-Heating",
+               "Crude-Diesel","Gasoline-Heating","Gasoline-Diesel","Heating-Diesel")
+```
+
+```{r fig.height = 8,echo=F,eval=F}
+pairwise(sp_lag1_total)
+plot(z,main="Pairwise spillovers")
+```
+
+
+## Frequency Dependent Spillover
+
+Get the frequency connectedness on partition roughly corresponding to movements of 1-5,5-20,20-200,200-inf days.
+Using window 100, lag 1
+```{r frequency,echo=F}
+bounds <- c(pi+0.00001, pi/5, pi/20, pi/200, 0)
+sp_BK12<-spilloverBK12(est_lag1, n.ahead = 100, no.corr = F, partition = bounds)
+print("Frequency Bands")
+print(sp_BK12)
+# print("Total (collapsed bands)")
+# collapseBounds(sp_BK12, 1:4)
+sp_roll_BK12<-readRDS("data/sp_data/sp_roll_freq_lag1.rds")
+ovs<-overall(sp_roll_BK12)
+ovs_freq<-data.frame(matrix(NA,0,3))
+colnames(ovs_freq)<-c("series","date","val")
+mains<-c("1-5","5-20","20-200","200-inf")
+for(j in 1:length(ovs)){
+  i<-ovs[[j]] %>% as.data.frame()
+  ov_sp <- cbind(rep(mains[j],nrow(i)),rownames(i), i)
+  colnames(ov_sp)<-c("series","date","val")
+  ovs_freq<-rbind(ovs_freq,ov_sp)
+}
+ovs_freq$date<-as.POSIXct(ovs_freq$date)
+rownames(ovs_freq) <- 1:nrow(ovs_freq)
+ovs_freq$series = factor(ovs_freq$series, levels=mains)
+freq_plot<-ggplot(ovs_freq,aes(x=date,y=val, colour=series)) + 
+  geom_line() + 
+  scale_y_continuous(limits = c(0, 80))+
+  scale_x_datetime(labels = date_format("%Y"),date_breaks = "1 year")+
+  theme(axis.text.x=element_text(angle=60,hjust=1))+
+  theme(axis.title.x=element_blank())+
+ theme(legend.position = "none")
+
+total_lag1<-readRDS("data/sp_data/sp_w100_lag1.rds")
+total_lag1<-overall(total_lag1)[[1]] %>% as.data.frame()
+total_lag1 <- cbind(rownames(total_lag1), total_lag1)
+colnames(total_lag1)<-c("date","val")
+rownames(total_lag1) <- 1:nrow(total_lag1)
+total_lag1$date<-as.POSIXct(total_lag1$date)
+
+total_plot<-ggplot(total_lag1,aes(x=date,y=val)) + 
+  geom_line() + 
+  scale_y_continuous(limits = c(0, 80))+
+  scale_x_datetime(labels = date_format("%Y"),date_breaks = "1 year") +
+  theme(axis.text.x=element_text(angle=60,hjust=1))+
+  theme(axis.title.x=element_blank())
+
+```
+### Frequency plots
+Red 1-5
+
+Green 5-20
+
+Blue 20-200
+
+Purple 200-inf (Was not plotted in Fig.4 BK2019)
+```{r fig.height = 8, fig.width = 8}
+grid.arrange(total_plot, freq_plot, nrow = 2)
+```
+
+#### Correspondiong spikes
+```{r spikes}
+total_lag1 %>% arrange(desc(val)) %>% head(5)
+ovs_freq%>%dplyr::filter(series=="200-inf") %>% arrange(desc(val)) %>% head(5)
+```
+
+
+### Frequency spillovers for selected ranges
+```{r period_sp_freq,echo=F,message=T,warning=T}
+
+selectInput("period_freq", "Choose a period:",
+      list(`Freq Period` = list("GFC", "Post-GFC", "Low oil prices","Fed Rates Increase","Covid"))
+    )
+
+renderPlot({
+dt_from<-ranges %>% filter(labels== input$period_freq) %>% select(2) %>% pull()
+dt_to<-ranges %>% filter(labels == input$period_freq) %>% select(3) %>% pull()
+
+sp_roll_BK12<-readRDS("data/sp_data/sp_roll_freq_lag1.rds")
+ovs<-overall(sp_roll_BK12)
+ovs_freq<-data.frame(matrix(NA,0,3))
+colnames(ovs_freq)<-c("series","date","val")
+mains<-c("1-5","5-20","20-200","200-inf")
+for(j in 1:length(ovs)){
+  i<-ovs[[j]] %>% as.data.frame()
+  ov_sp <- cbind(rep(mains[j],nrow(i)),rownames(i), i)
+  colnames(ov_sp)<-c("series","date","val")
+  ovs_freq<-rbind(ovs_freq,ov_sp)
+}
+ovs_freq$date<-as.POSIXct(ovs_freq$date)
+rownames(ovs_freq) <- 1:nrow(ovs_freq)
+ovs_freq$series = factor(ovs_freq$series, levels=mains)
+ovs_freq<-ovs_freq %>% filter(date>=dt_from,date<=dt_to)
+freq_plot<-ggplot(ovs_freq,aes(x=date,y=val, colour=series)) + 
+  geom_line() + 
+  scale_y_continuous(limits = c(0, 80))+
+  scale_x_datetime(labels = date_format("%Y-%m"),date_breaks = "1 month")+
+  theme(axis.text.x=element_text(angle=60,hjust=1))+
+  theme(axis.title.x=element_blank())
+freq_plot
+})
+
+```
+
+## PCA
+```{r pca_stats,echo=F}
+print("Correlation of normalized indexes")
+ggcorrplot(pca_corr_norm,lab = TRUE)
+print("Correlation of returns")
+ggcorrplot(pca_corr_ret, lab = TRUE)
+head(pca_vals) %>% 
+    kbl()%>%
+    kable_classic_2(full_width = F)
+```
+
+
+
+
+
+
+
+
