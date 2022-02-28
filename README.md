@@ -1,4 +1,3 @@
 # Energy commodity spillovers
 
-Applying Spillover analysis on oil-based commodites 
-https://cran.r-project.org/web/packages/frequencyConnectedness/frequencyConnectedness.pdf 
+Applying spillover analysis and dynamic conditional correlation model on oil-based commodites.
