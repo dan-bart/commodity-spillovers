@@ -316,7 +316,7 @@ for(i in 2:length(log_ret_df)){
   garch_orders<-best_garch(fit_auto)
   model_specification <- ugarchspec(mean.model = list(armaOrder = c(opt_ar,opt_ma), include.mean = TRUE),
                                         variance.model = list(garchOrder = c(garch_orders[1],garch_orders[2])))
-  garch_fit_res<-residuals(ugarchfit(model_specification,val)) %>% as.vector()
+  garch_fit_res<-residuals(ugarchfit(model_specification,val),standardize=T) %>% as.vector()
   shapiro_norm_list[[i-1]]<-shapiro.test(sample(val,size=min(5000,length(val)),replace = F))
   adf_list[[i-1]] <- tseries::adf.test(val)
   ma_1_list[[i-1]] <- opt_ar

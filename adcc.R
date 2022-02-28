@@ -136,7 +136,7 @@ hedgeMat<-function(table,dt){
 
 log_ret_df<-readRDS("data/log_ret.rds")
 dummy_thursday<-readRDS("data/dummy_log_ret.rds")
-dummy_thursday <-dummy_thursday %>% dplyr::filter(rownames(dummy_thursday)>=covid_from,rownames(dummy_thursday)<=covid_to) %>%
+dummy_thursday <-subset(dummy_thursday,Date>=covid_from & Date<=covid_to) %>%
   select(Weekday_Thursday) %>% as.matrix()
 data<-log_ret_df[-1] %>%as.data.frame() %>% select(Crude_Oil_WTI,Diesel,Heating_Oil,Natural_Gas,NY_Gasoline)
 dates<-log_ret_df[1]%>%pull()
@@ -168,7 +168,6 @@ garch_1041<-ugarchspec(mean.model = list(armaOrder = c(1,0)),
 garch_1021<-ugarchspec(mean.model = list(armaOrder = c(1,0)),
                        variance.model = list(garchOrder=c(4,1)))
 
-## POST-GFC
 
 
 ### AR and ARCH test
@@ -220,7 +219,6 @@ ny_gas<-ugarchfit(garch_0011,gfc_data[5])
 
 
 gfc_fit<-dccfit(dcc.11mn,data=gfc_data)
-gfc_fit@mfit$
 dcc_cov<-rcov(gfc_fit)
 dcc_cov_list<-lapply(seq(dim(dcc_cov)[3]), function(x) dcc_cov[ , , x])
 hedge_list<-lapply(dcc_cov_list,hedgeMat,dt=gfc_data)
@@ -292,25 +290,6 @@ fed_rates_weight<-adcc_output(weight_list,data=fed_rates_data,type="weight") %>%
 covid_data <-data %>% dplyr::filter(rownames(data)>=covid_from,rownames(data)<=covid_to)
 covid_spec<-multispec(c(garch_0051_thursday,garch_0021,garch_0021,garch_1041,garch_1021))
 covid_dates<-rownames(covid_data)
-
-p_max <- 7
-q_max <- 7
-aic_min <- Inf
-best_p <- 0
-best_q <- 0
-
-for (i1 in 1:p_max) {
-  for (i2 in 1:q_max) {
-    model_specification <- ugarchspec(mean.model = list(armaOrder = c(0, 0), include.mean = TRUE),
-                                      variance.model = list(garchOrder = c(i1, i2)))
-    fit <- ugarchfit(spec = model_specification, data = covid_data[1])
-    inf_crit <- infocriteria(fit)[1]
-    aic_min <- ifelse(inf_crit < aic_min, inf_crit, aic_min)
-
-    best_p <- ifelse(inf_crit == aic_min, i1, best_p)
-    best_q <- ifelse(inf_crit == aic_min, i2, best_q)
-  }
-}
 
 oil<-ugarchfit(garch_0051_thursday,covid_data[1])
 diesel<-ugarchfit(garch_0021,covid_data[2])
