@@ -1,5 +1,3 @@
-<<<<<<< HEAD
-# spillovers
-=======
-# commodity-spillovers
->>>>>>> 5d1896c3fe963b2d86ed5f69ca822d85f2d025b2
+# Energy commodity spillovers
+
+Applying spillover analysis and dynamic conditional correlation model on oil-based commodites.
